@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>SolarSage Desktop</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' blob:; img-src 'self' blob: data:;
+                 style-src 'self' 'unsafe-inline';
+                 script-src 'self';
+                 connect-src 'self' http://127.0.0.1:8000 http://localhost:8000;">
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header>
+    <h1>SolarSage Desktop</h1>
+    <div class="status" id="healthStatus">API: unknown</div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="live" class="active">Live</button>
+    <button data-tab="upload">Upload</button>
+    <button data-tab="batch">Batch</button>
+    <button data-tab="results">Results</button>
+    <button data-tab="analytics">Analytics</button>
+  </nav>
+
+  <main>
+    <section id="tab-live" class="tab active">
+      <div class="card">
+        <h2>Live Camera</h2>
+        <video id="video" autoplay playsinline></video>
+        <div class="controls">
+          <button id="startCam">Start Camera</button>
+          <button id="snapAndPredict">Snapshot & Predict</button>
+        </div>
+        <canvas id="canvas" style="display:none;"></canvas>
+        <div class="result">
+          <div>Label: <span id="liveLabel">-</span></div>
+          <div>Score: <span id="liveScore">-</span></div>
+          <div>Latency: <span id="liveLatency">-</span> ms</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-upload" class="tab">
+      <div class="card">
+        <h2>Single Image Predict</h2>
+        <input type="file" id="fileInput" accept="image/png, image/jpeg"/>
+        <button id="uploadPredict">Predict</button>
+        <img id="preview" alt="" />
+        <div class="result">
+          <div>Label: <span id="upLabel">-</span></div>
+          <div>Score: <span id="upScore">-</span></div>
+          <div>Latency: <span id="upLatency">-</span> ms</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-batch" class="tab">
+      <div class="card">
+        <h2>Batch Predict</h2>
+        <p style="margin-top:0;">Select multiple images; they’ll be sent to <code>/predict-batch</code> with field <code>files</code>.</p>
+        <input type="file" id="batchFileInput" accept="image/png, image/jpeg" multiple />
+        <div class="controls">
+          <button id="batchPredict">Predict Batch</button>
+          <button id="batchDownloadCsv">Download Batch CSV</button>
+          <span id="batchSelected">No files selected</span>
+        </div>
+        <div class="result" style="margin-top:8px;">
+          <div>Batch: <span id="batchSummary">-</span></div>
+        </div>
+        <table id="batchTable" style="margin-top:8px;">
+          <thead><tr><th>File</th><th>Label</th><th>Score</th><th>Latency (ms)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-results" class="tab">
+      <div class="card">
+        <h2>Session Results</h2>
+        <div class="controls" style="margin-bottom:8px;">
+          <button id="downloadSessionCsv">Download Session CSV</button>
+        </div>
+        <table id="resultsTable">
+          <thead><tr><th>When</th><th>Source</th><th>Label</th><th>Score</th><th>Latency (ms)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-analytics" class="tab">
+      <div class="card">
+        <h2>Analytics</h2>
+        <div id="analyticsSummary">
+          <div>Total Predictions: <span id="totalPreds">0</span></div>
+          <div>Clean Count: <span id="cleanCount">0</span></div>
+          <div>Dirty Count: <span id="dirtyCount">0</span></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <button id="checkHealth">Check API Health</button>
+    <span class="apiUrl">API: <code id="apiUrl"></code></span>
+  </footer>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>

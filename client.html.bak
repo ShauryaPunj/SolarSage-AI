@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Solar Sage — Quick Test</title>
+<style>
+  body{font:16px system-ui, sans-serif; max-width:680px; margin:40px auto; line-height:1.4}
+  .box{border:1px solid #ddd; padding:16px; border-radius:12px}
+  pre{background:#f6f8fa; padding:12px; border-radius:8px; overflow:auto}
+  button{padding:8px 14px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer}
+</style>
+<h1>Solar Sage — Predict Image</h1>
+<div class="box">
+  <input id="file" type="file" accept=".jpg,.jpeg,.png">
+  <button id="go">Predict</button>
+  <div id="msg"></div>
+  <pre id="out"></pre>
+</div>
+<script>
+  const go = document.getElementById('go');
+  const file = document.getElementById('file');
+  const msg = document.getElementById('msg');
+  const out = document.getElementById('out');
+
+  go.onclick = async () => {
+    if (!file.files.length) { msg.textContent = "Choose a JPEG/PNG first."; return; }
+    msg.textContent = "Uploading…";
+    out.textContent = "";
+    const fd = new FormData();
+    fd.append('image', file.files[0]);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/predict-image', { method:'POST', body: fd });
+      const data = await res.json();
+      msg.textContent = `Label: ${data.label}  |  Score: ${data.score}`;
+      out.textContent = JSON.stringify(data, null, 2);
+    } catch (e) {
+      msg.textContent = 'Failed: ' + e;
+    }
+  };
+</script>

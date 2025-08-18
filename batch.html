@@ -1,0 +1,100 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Solar Sage — Batch Predict</title>
+<style>
+  body{font:16px system-ui, sans-serif; max-width:900px; margin:40px auto; line-height:1.45}
+  .box{border:1px solid #ddd; padding:16px; border-radius:12px}
+  button{padding:8px 14px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer}
+  table{border-collapse:collapse; width:100%; margin-top:12px}
+  th,td{border:1px solid #eee; padding:8px; text-align:left}
+  th{background:#fafafa}
+  #msg{margin-top:10px}
+</style>
+
+<h1>Solar Sage — Batch Predict</h1>
+
+<div class="box">
+  <input id="files" type="file" multiple accept=".jpg,.jpeg,.png">
+  <button id="go">Predict (Batch)</button>
+  <button id="dl" disabled>Download CSV</button>
+  <div id="msg"></div>
+  <table id="tbl" style="display:none">
+    <thead><tr><th>File</th><th>Label</th><th>Score</th><th>Mode</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<script>
+const API = 'http://127.0.0.1:8000/predict-batch';
+const filesEl = document.getElementById('files');
+const go = document.getElementById('go');
+const dl = document.getElementById('dl');
+const msg = document.getElementById('msg');
+const tbl = document.getElementById('tbl');
+const tbody = tbl.querySelector('tbody');
+let lastResults = []; // for CSV
+
+function toCSV(rows){
+  const head = ['file','label','score'];
+  const lines = [head.join(',')];
+  for (const r of rows){
+    const file = (r.file||'').replaceAll('"','""');
+    const label = (r.label||'').replaceAll('"','"');
+    const score = (r.score ?? '').toString();
+    lines.push([file,label,score].join(','));
+  }
+  return lines.join('\n');
+}
+
+dl.onclick = () => {
+  const blob = new Blob([toCSV(lastResults)], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'batch_results.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+
+go.onclick = async () => {
+  const files = filesEl.files;
+  if (!files.length){ msg.textContent = 'Choose some JPEG/PNG files first.'; return; }
+
+  // build multipart form with the SAME field name 'files' for each file
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f, f.name);
+
+  msg.textContent = 'Uploading…';
+  dl.disabled = true;
+  tbl.style.display = 'none';
+  tbody.innerHTML = '';
+
+  try {
+    const res = await fetch(API, { method:'POST', body: fd });
+    if (!res.ok){
+      const text = await res.text();
+      throw new Error(res.status + ' ' + text);
+    }
+    const data = await res.json(); // array of {file,label,score,meta:{mode}}
+    lastResults = data;
+
+    // render table
+    for (const r of data){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r.file||''}</td>
+                      <td>${r.label||''}</td>
+                      <td>${(r.score??'').toFixed ? r.score.toFixed(3) : r.score}</td>
+                      <td>${r.meta?.mode||''}</td>`;
+      tbody.appendChild(tr);
+    }
+    tbl.style.display = '';
+    msg.textContent = `Done: ${data.length} images`;
+    dl.disabled = false;
+  } catch (e){
+    msg.textContent = 'Failed: ' + e.message;
+  }
+};
+</script>
+

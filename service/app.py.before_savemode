@@ -1,0 +1,285 @@
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Tuple, Dict, Any
+import numpy as np
+import time, os, io, sys
+
+# Optional heavy deps: only import if we actually load a model
+_onnx = None
+_cv2  = None
+
+# ======== CONFIG TOGGLES ========
+CLASS_ORDER = ("CLEAN", "DIRTY")   # flip to ("DIRTY","CLEAN") if predictions look reversed
+COLOR_SPACE = "RGB"                # "RGB" (default) or "BGR"
+NORM        = "0_1"                # "0_1", "IMAGENET", or "NEG1_1"
+THRESH      = 0.70                 # decision threshold on p_dirty
+DEBUG_RAW   = True                 # prints logits/probs in terminal (truncated)
+HEURISTIC_IF_1000 = True           # simple fallback when model output is 1000 classes
+# =================================
+
+app = FastAPI(title="Solar Panel Clean/Dirty Inference API", version="1.0.0")
+
+# CORS: allow all origins during local dev (no credentials with "*")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------- Model init ----------
+APP_DIR     = os.path.dirname(__file__)
+MODEL_PATH  = os.path.join(APP_DIR, "model.onnx")
+MOCK_MODE   = False                # auto-enabled if model missing
+
+IN_NAME     = None
+IN_SHAPE    = None
+NCHW        = True                 # will be detected from model input
+PROVIDER    = "CPUExecutionProvider"
+SESS        = None
+
+
+def _lazy_import_heavy():
+    """Import on first use to keep startup friendly."""
+    global _onnx, _cv2
+    if _onnx is None:
+        import onnxruntime as ort
+        _onnx = ort
+    if _cv2 is None:
+        import cv2
+        _cv2 = cv2
+
+
+def _detect_layout(shape: Tuple[int, ...]) -> Tuple[bool, int, int]:
+    """
+    Given ONNX input shape (N,C,H,W) or (N,H,W,C), return:
+    - NCHW boolean
+    - H, W ints (fall back to 224 if dynamic)
+    """
+    if len(shape) != 4:
+        # try to be sane
+        return True, 224, 224
+
+    n, a, b, c = shape
+    # dynamic dims can be None or 'None'
+    def _asint(x, default):
+        try:
+            return int(x)
+        except Exception:
+            return default
+
+    if a == 3:  # NCHW
+        H = _asint(b, 224)
+        W = _asint(c, 224)
+        return True, H, W
+    elif c == 3:  # NHWC
+        H = _asint(a, 224)
+        W = _asint(b, 224)
+        return False, H, W
+    else:
+        # unknown; assume NCHW 224
+        return True, 224, 224
+
+
+def _preprocess(img_bgr: np.ndarray) -> np.ndarray:
+    """
+    Returns batched tensor according to model layout + normalization.
+    """
+    # convert color
+    if COLOR_SPACE.upper() == "RGB":
+        img = _cv2.cvtColor(img_bgr, _cv2.COLOR_BGR2RGB)
+    else:
+        img = img_bgr.copy()
+
+    # resize to model HxW
+    H, W = _HW
+    img = _cv2.resize(img, (W, H), interpolation=_cv2.INTER_AREA)
+
+    img = img.astype(np.float32)
+
+    if NORM.upper() == "0_1":
+        img = img / 255.0
+    elif NORM.upper() == "IMAGENET":
+        img = img / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img = (img - mean) / std
+    elif NORM.upper() == "NEG1_1":
+        img = (img / 127.5) - 1.0
+    else:
+        # unknown norm string; leave as raw 0..255 scaled down
+        img = img / 255.0
+
+    if NCHW:
+        img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
+
+    img = np.expand_dims(img, 0)  # add batch
+    return img
+
+
+def _read_image_bytes(file: UploadFile) -> np.ndarray:
+    """
+    Validates content type, decodes JPEG/PNG via cv2.imdecode.
+    """
+    ct = (file.content_type or "").lower()
+    name = (file.filename or "").lower()
+
+    ok_ext = name.endswith(".jpg") or name.endswith(".jpeg") or name.endswith(".png")
+    ok_ct  = ct in ("image/jpeg", "image/jpg", "image/png")
+
+    if not (ok_ext or ok_ct):
+        raise HTTPException(
+            status_code=415,
+            detail={"error": {"code": "UNSUPPORTED_MEDIA_TYPE", "message": "Only JPEG/PNG allowed"}}
+        )
+
+    raw = file.file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    img = _cv2.imdecode(arr, _cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=415, detail="Could not decode image")
+    return img
+
+
+def _softmax(x: np.ndarray) -> np.ndarray:
+    x = x.astype(np.float32)
+    x = x - x.max()
+    e = np.exp(x)
+    return e / (e.sum() + 1e-9)
+
+
+def _heuristic_p_dirty(logits: np.ndarray) -> Tuple[float, str]:
+    """
+    Super simple “image is dirty” score when the model outputs 1000 classes
+    (e.g., an ImageNet backbone). Tuned for local dev only.
+    """
+    # Try to produce a stable [0..1] score using the raw energy of the vector.
+    mean_raw = float(np.mean(logits))
+    # Squash into 0..1; shift helps put typical means ~2-4 into the 0.6-0.8 band.
+    p_dirty = 1.0 / (1.0 + np.exp(-(mean_raw - 2.0)))
+    mode = "heuristic"
+    return p_dirty, mode
+
+
+def _predict_tensor(t: np.ndarray) -> Tuple[str, float, str, Dict[str, Any]]:
+    """
+    Runs inference and returns (label, score, mode, extras)
+    """
+    if MOCK_MODE:
+        # brightness-based mock to keep behavior deterministic
+        # (DIRTY if darker on average)
+        img = t
+        if NCHW:
+            img = np.transpose(img[0], (1, 2, 0))
+        else:
+            img = img[0]
+        gray = np.mean(img)
+        p_dirty = 1.0 - np.clip(gray, 0, 1)  # darker -> closer to 1
+        label = "DIRTY" if p_dirty >= THRESH else "CLEAN"
+        return label, float(p_dirty), "mock", {}
+
+    # real model
+    out = SESS.run(None, {IN_NAME: t})
+    logits = out[0].squeeze()
+    if logits.ndim > 1:
+        logits = logits.reshape(-1)
+
+    extras = {}
+    if DEBUG_RAW:
+        # print a small, focused snapshot to server console without flooding
+        head = np.array2string(logits[:24], precision=3, separator=", ")
+        tail = np.array2string(logits[-24:], precision=3, separator=", ")
+        print("\n--- PRED DEBUG ---", file=sys.stderr)
+        print(f"raw (head): {head}", file=sys.stderr)
+        print(f"raw (tail): {tail}", file=sys.stderr)
+
+    n = logits.shape[0]
+
+    # Case A: 2 logits -> assume [CLEAN, DIRTY] in CLASS_ORDER
+    if n == 2:
+        probs = _softmax(logits)
+        # map to CLASS_ORDER (index 0 -> CLASS_ORDER[0], etc.)
+        mapping = {CLASS_ORDER[0]: float(probs[0]), CLASS_ORDER[1]: float(probs[1])}
+        p_dirty = mapping["DIRTY"] if "DIRTY" in mapping else float(probs[1])
+        label = "DIRTY" if p_dirty >= THRESH else "CLEAN"
+        mode = "model_2class"
+        extras["probs"] = {"CLEAN": float(mapping.get("CLEAN", 1.0 - p_dirty)),
+                           "DIRTY": float(p_dirty)}
+        return label, float(p_dirty), mode, extras
+
+    # Case B: big vector (e.g., 1000)
+    if n >= 10 and HEURISTIC_IF_1000:
+        p_dirty, mode = _heuristic_p_dirty(logits)
+        label = "DIRTY" if p_dirty >= THRESH else "CLEAN"
+        return label, float(p_dirty), mode, extras
+
+    # Unknown shape -> safe default
+    probs = _softmax(logits)
+    p_dirty = float(np.clip(probs[-1], 0.0, 1.0))
+    label = "DIRTY" if p_dirty >= THRESH else "CLEAN"
+    return label, p_dirty, "model_generic", {}
+
+
+# Try to load model (or fall back to mock)
+try:
+    if os.path.exists(MODEL_PATH):
+        _lazy_import_heavy()
+        SESS = _onnx.InferenceSession(MODEL_PATH, providers=[PROVIDER])
+        inp = SESS.get_inputs()[0]
+        IN_NAME  = inp.name
+        IN_SHAPE = tuple(inp.shape)
+        NCHW, H, W = _detect_layout(IN_SHAPE)
+        _HW = (H, W)
+    else:
+        MOCK_MODE = True
+        # Synthetic “model shape” for preprocessing
+        NCHW, H, W = True, 224, 224
+        _HW = (H, W)
+except Exception as e:
+    # If loading fails, fall back to mock so you can still dev/test
+    print(f"[WARN] Failed to load model: {e}", file=sys.stderr)
+    MOCK_MODE = True
+    NCHW, H, W = True, 224, 224
+    _HW = (H, W)
+
+
+# ---------- Routes ----------
+@app.get("/health")
+def health():
+    return {"status": "ok", "model": "v1.0-mock" if MOCK_MODE else "v1.0"}
+
+@app.get("/model-info")
+def model_info():
+    return {
+        "mock": MOCK_MODE,
+        "path": MODEL_PATH,
+        "input_name": IN_NAME,
+        "input_shape": IN_SHAPE,
+        "nchw": NCHW,
+        "hw": _HW,
+        "provider": PROVIDER,
+        "config": {
+            "CLASS_ORDER": CLASS_ORDER,
+            "COLOR_SPACE": COLOR_SPACE,
+            "NORM": NORM,
+            "THRESH": THRESH,
+            "HEURISTIC_IF_1000": HEURISTIC_IF_1000,
+        }
+    }
+
+@app.post("/predict-image")
+def predict_image(image: UploadFile = File(...)):
+    t0 = time.time()
+    _lazy_import_heavy()
+    img = _read_image_bytes(image)
+    tensor = _preprocess(img)
+    label, score, mode, extras = _predict_tensor(tensor)
+    ms = int((time.time() - t0) * 1000)
+    if DEBUG_RAW:
+        print(f"p_dirty={score:.3f}  THRESH={THRESH}  -> {label}  mode:{mode}", file=sys.stderr)
+    return {"label": label, "score": round(float(score), 3), "meta": {"latency_ms": ms, "mode": mode, **extras}}
+

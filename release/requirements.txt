@@ -1,0 +1,7 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+numpy>=1.26
+requests>=2.31
+onnx>=1.15
+onnxruntime>=1.18
+tqdm>=4.66

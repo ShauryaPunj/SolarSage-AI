@@ -1,0 +1,211 @@
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import numpy as np
+import onnxruntime as ort
+import cv2, time, os
+
+# ======== CONFIG TOGGLES ========
+CLASS_ORDER = ("CLEAN", "DIRTY")   # flip to ("DIRTY","CLEAN") if predictions look reversed
+COLOR_SPACE = "RGB"                # try "BGR" if colors look off
+NORM        = "0_1"                # try "IMAGENET" or "NEG1_1" if needed
+THRESH      = 0.70                 # decision threshold on p_dirty
+DEBUG_RAW   = True                 # prints logits/probs in terminal (truncated)
+HEURISTIC_IF_1000 = True           # use simple fallback when model output is 1000 classes
+# =================================
+
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------- Model init ----------
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.onnx")
+if not os.path.exists(MODEL_PATH):
+    raise RuntimeError(f"model.onnx not found at {MODEL_PATH}")
+
+sess = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+inp = sess.get_inputs()[0]
+IN_NAME  = inp.name
+IN_SHAPE = inp.shape
+
+def _get_hw_nchw():
+    H = IN_SHAPE[2] if isinstance(IN_SHAPE[2], int) else 224
+    W = IN_SHAPE[3] if isinstance(IN_SHAPE[3], int) else 224
+    return H, W
+
+def _get_hw_nhwc():
+    H = IN_SHAPE[1] if isinstance(IN_SHAPE[1], int) else 224
+    W = IN_SHAPE[2] if isinstance(IN_SHAPE[2], int) else 224
+    return H, W
+
+def _normalize(x):
+    if NORM == "0_1":
+        return x.astype(np.float32) / 255.0
+    if NORM == "NEG1_1":
+        return (x.astype(np.float32) / 255.0 - 0.5) / 0.5
+    if NORM == "IMAGENET":
+        x = x.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        return (x - mean) / std
+    # default
+    return x.astype(np.float32) / 255.0
+
+def preprocess_bgr(img_bgr):
+    nchw = (len(IN_SHAPE) == 4 and isinstance(IN_SHAPE[1], int) and IN_SHAPE[1] == 3)
+    img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB) if COLOR_SPACE == "RGB" else img_bgr.copy()
+    if nchw:
+        H, W = _get_hw_nchw()
+        img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+        x = _normalize(img)
+        x = np.transpose(x, (2, 0, 1))[None, ...]  # [1,3,H,W]
+    else:
+        H, W = _get_hw_nhwc()
+        img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+        x = _normalize(img)[None, ...]              # [1,H,W,3]
+    return x
+
+def _softmax_1d(z: np.ndarray) -> np.ndarray:
+    z = z.astype(np.float32)
+    z = z - z.max()
+    ez = np.exp(z, dtype=np.float32)
+    s = ez.sum()
+    return ez / (s + 1e-12)
+
+def heuristic_dirty_prob(img_bgr):
+    """Very simple fallback used only if model output is 1000 classes."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    bright = float(gray.mean()) / 255.0                 # 0=dark, 1=bright
+    edges = cv2.Canny(gray, 100, 200)
+    edge_density = float((edges > 0).mean())            # 0=flat, 1=edge-y
+    p_dirty = 0.65*(1.0 - bright) + 0.35*(1.0 - edge_density)
+    return float(np.clip(p_dirty, 0.0, 1.0))
+
+def _fmt_arr_for_debug(a, max_elems=48):
+    """Truncate long arrays for debug printing."""
+    try:
+        flat = np.array(a).ravel().tolist()
+    except Exception:
+        return a
+    if len(flat) <= max_elems:
+        return flat
+    head = flat[:24]
+    tail = flat[-24:]
+    return head + ["..."] + tail
+
+def _layout():
+    return "NCHW" if (len(IN_SHAPE) == 4 and isinstance(IN_SHAPE[1], int) and IN_SHAPE[1] == 3) else "NHWC"
+
+# ---------- Routes ----------
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/model-info")
+def model_info():
+    outs = [{"name": o.name, "shape": o.shape, "type": o.type} for o in sess.get_outputs()]
+    return {
+        "input": {"name": IN_NAME, "shape": IN_SHAPE, "type": inp.type},
+        "outputs": outs,
+        "layout": _layout(),
+        "config": {"color_space": COLOR_SPACE, "norm": NORM, "class_order": CLASS_ORDER}
+    }
+
+@app.post("/predict-image")
+async def predict_image(image: UploadFile = File(...)):
+    if image.content_type not in ("image/jpeg", "image/png"):
+        raise HTTPException(
+            415,
+            detail={"error": {"code": "UNSUPPORTED_MEDIA_TYPE", "message": "Only JPEG/PNG allowed"}}
+        )
+
+    buf = np.frombuffer(await image.read(), np.uint8)
+    img_bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        raise HTTPException(400, detail={"error": {"code": "BAD_IMAGE", "message": "Decode failed"}})
+
+    t0 = time.time()
+    x = preprocess_bgr(img_bgr)
+
+    try:
+        out = sess.run(None, {IN_NAME: x})[0]  # logits or probs
+    except Exception as e:
+        raise HTTPException(500, detail={"error": {"code": "INFERENCE_ERROR", "message": str(e)}})
+
+    used_heuristic = False
+
+    # normalize to 1D vector
+    vec = out
+    if vec.ndim == 2 and vec.shape[0] == 1:
+        vec = vec[0]
+    if vec.ndim != 1:
+        vec = np.array(vec).reshape(-1)
+
+    # ---- Decision: always compute p_dirty, then label from threshold ----
+    if vec.shape[-1] == 1000 and HEURISTIC_IF_1000:
+        # 1000-class fallback: use brightness/edges heuristic
+        p_dirty = heuristic_dirty_prob(img_bgr)
+        mode = "heuristic"
+        used_heuristic = True
+
+    elif vec.shape[-1] == 1:
+        # one-logit binary → sigmoid gives p_dirty
+        logit = float(vec[0])
+        p_dirty = 1.0 / (1.0 + np.exp(-logit))
+        mode = "model"
+
+    elif vec.shape[-1] == 2:
+        # two-class → softmax then map to p_dirty using CLASS_ORDER
+        sm = _softmax_1d(vec)
+        if CLASS_ORDER == ("CLEAN", "DIRTY"):
+            p_dirty = float(sm[1])
+        elif CLASS_ORDER == ("DIRTY", "CLEAN"):
+            p_dirty = float(sm[0])
+        else:
+            # if someone changed CLASS_ORDER to unexpected values, assume index 1 is DIRTY
+            p_dirty = float(sm[1])
+        mode = "model"
+
+    else:
+        # Unexpected #classes: if we have at least two, treat first two as CLEAN/DIRTY pair
+        if vec.shape[0] >= 2:
+            sm = _softmax_1d(vec[:2])
+            if CLASS_ORDER == ("CLEAN", "DIRTY"):
+                p_dirty = float(sm[1])
+            else:
+                p_dirty = float(sm[0])
+            mode = "model"
+        else:
+            raise HTTPException(
+                500,
+                detail={"error": {"code": "BAD_OUTPUT", "message": f"Unexpected model output shape {out.shape}"}}
+            )
+
+    p_dirty = float(np.clip(p_dirty, 0.0, 1.0))
+    p_clean = 1.0 - p_dirty
+
+    # Final label from threshold on p_dirty (this avoids the idx/label mismatch)
+    label = "DIRTY" if p_dirty >= THRESH else "CLEAN"
+    score = p_dirty if label == "DIRTY" else p_clean
+
+    latency_ms = int((time.time() - t0) * 1000)
+
+    if DEBUG_RAW:
+        try:
+            print("\n--- PRED DEBUG ---")
+            print("raw (truncated):", _fmt_arr_for_debug(out))
+            print(f"p_clean={p_clean:.3f} p_dirty={p_dirty:.3f}  THRESH={THRESH}")
+            print("mode:", mode)
+            print("label:", label, "score:", round(score, 3))
+        except Exception:
+            pass
+
+    return {
+        "label": label,
+        "score": round(score, 3),
+        "meta": {"latency_ms": latency_ms, "mode": mode}
+    }

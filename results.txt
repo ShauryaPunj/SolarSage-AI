@@ -1,0 +1,4 @@
+>>> samples/001.png
+{"label":"DIRTY","score":0.717,"meta":{"latency_ms":34,"mode":"heuristic"}}
+>>> samples/002.png
+{"label":"DIRTY","score":0.776,"meta":{"latency_ms":4,"mode":"heuristic"}}

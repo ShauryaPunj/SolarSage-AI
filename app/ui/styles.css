@@ -1,0 +1,23 @@
+body { font-family: system-ui, Arial, sans-serif; margin: 0; background: #0b1020; color: #e7e9ee; }
+header { display:flex; justify-content:space-between; align-items:center; padding:12px 16px; background:#141a33; border-bottom:1px solid #252b48; }
+h1 { font-size:18px; margin:0; }
+.status { padding:4px 8px; border-radius:6px; background:#3a3f5a; }
+.status.ok { background:#1f6f43; }
+.status.bad { background:#7a1f2e; }
+.tabs { display:flex; gap:8px; padding:8px 16px; background:#0f1530; position:sticky; top:0; border-bottom:1px solid #252b48; }
+.tabs button { background:#1a2040; color:#cfd4e1; border:1px solid #2a2f55; padding:8px 12px; border-radius:8px; cursor:pointer; }
+.tabs button.active { background:#2a3170; border-color:#4e58a8; }
+main { padding:16px; display:grid; grid-template-columns: 1fr; gap:16px; }
+.card { background:#121836; border:1px solid #252b48; border-radius:12px; padding:16px; box-shadow:0 4px 16px rgba(0,0,0,0.3); }
+video { width:100%; max-height:420px; background:#000; border-radius:8px; }
+.controls { margin-top:8px; display:flex; gap:8px; }
+.controls button, #checkHealth, #uploadPredict, #startCam, #snapAndPredict { background:#3341a1; color:white; border:none; padding:8px 12px; border-radius:8px; cursor:pointer; }
+.controls button:hover, #checkHealth:hover, #uploadPredict:hover { filter:brightness(1.1); }
+#preview { max-width: 100%; margin-top:12px; border-radius:8px; }
+.tab { display:none; }
+.tab.active { display:block; }
+table { width:100%; border-collapse: collapse; margin-top:8px; }
+th, td { border-bottom:1px solid #2b315a; padding:8px; text-align:left; }
+thead th { background:#18204a; position:sticky; top:0; }
+footer { display:flex; gap:16px; align-items:center; padding:12px 16px; border-top:1px solid #252b48; background:#0f1530; }
+.apiUrl code { color:#9fb3ff; }

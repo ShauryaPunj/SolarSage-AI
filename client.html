@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Solar Sage — Predict Image</title>
+<style>
+  :root { --box:#eaeef3; --clean:#0b8f2f; --dirty:#c62828; }
+  body{font:16px system-ui, sans-serif; max-width:760px; margin:40px auto; line-height:1.45}
+  h1{font-size:40px; letter-spacing:.2px}
+  .panel{border:1px solid #ddd; padding:16px; border-radius:12px}
+  .row{display:flex; gap:12px; align-items:center; flex-wrap:wrap}
+  button{padding:8px 14px; border-radius:10px; border:1px solid #ccc; background:#fff; cursor:pointer}
+  #out{background:var(--box); padding:12px; border-radius:8px; overflow:auto}
+  #preview{max-width:100%; max-height:280px; display:none; border-radius:10px; border:1px solid #ddd}
+  .clean{color:var(--clean); font-weight:600}
+  .dirty{color:var(--dirty); font-weight:600}
+  .muted{opacity:.6}
+</style>
+
+<h1>Solar Sage — Predict Image</h1>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:10px">
+    <input id="file" type="file" accept=".jpg,.jpeg,.png" />
+    <button id="go">Predict</button>
+    <span id="msg" class="muted"></span>
+  </div>
+
+  <img id="preview" alt="preview" />
+
+  <pre id="out" style="margin-top:14px; white-space:pre-wrap"></pre>
+</div>
+
+<script>
+  const file = document.getElementById('file');
+  const go   = document.getElementById('go');
+  const msg  = document.getElementById('msg');
+  const out  = document.getElementById('out');
+  const prev = document.getElementById('preview');
+
+  // show preview when a file is picked
+  file.addEventListener('change', () => {
+    if (!file.files.length) { prev.style.display='none'; return; }
+    const url = URL.createObjectURL(file.files[0]);
+    prev.src = url; prev.style.display = 'block';
+  });
+
+  go.onclick = async () => {
+    if (!file.files.length) { msg.textContent = "Choose a JPEG/PNG first."; return; }
+    msg.textContent = "Uploading…"; out.textContent = ""; go.disabled = true;
+
+    const fd = new FormData();
+    fd.append('image', file.files[0]);
+
+    try {
+      const res = await fetch('http://127.0.0.1:8000/predict-image', { method:'POST', body: fd });
+      const data = await res.json();
+
+      const label = (data.label || '').toUpperCase();
+      const score = typeof data.score === 'number' ? data.score.toFixed(3) : data.score;
+      const mode  = data?.meta?.mode || 'unknown';
+      const latency = data?.meta?.latency_ms;
+
+      const cls = label === 'DIRTY' ? 'dirty' : 'clean';
+      msg.innerHTML = `Label: <span class="${cls}">${label}</span>  |  Score: ${score}  <span class="muted">|  Mode: ${mode}${latency ? `  |  ${latency} ms` : ''}</span>`;
+      out.textContent = JSON.stringify(data, null, 2);
+    } catch (e) {
+      msg.textContent = 'Failed: ' + e;
+    } finally {
+      go.disabled = false;
+    }
+  };
+</script>
