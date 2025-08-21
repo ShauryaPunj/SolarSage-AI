@@ -1,32 +1,57 @@
-Fully local desktop app that classifies solar-panel images as **CLEAN** or **DIRTY**.
+# SolarSage AI - Windows Setup Guide
 
-- **Backend**: FastAPI + ONNX (ResNet18 2-class)
-- **Frontend**: Electron (webcam, single upload, batch, session results, CSV export)
-- **Privacy**: runs on your Mac; no cloud calls.
+Quick setup guide for running SolarSage AI on Windows.
 
----
+## Prerequisites
 
-## ✨ Features
+1. Install [Python](https://www.python.org/downloads/) (3.8 or higher)
+2. Install [Node.js](https://nodejs.org/) (Latest LTS version)
+3. Install [Git](https://git-scm.com/downloads)
 
-- **Live**: Use your webcam → capture → predict (label, score, latency).
-- **Upload**: Select one image (JPEG/PNG) → predict.
-- **Batch**: Select multiple images → predict all → per-file table → **Download Batch CSV**.
-- **Results**: Full session history (Live/Upload/Batch) → **Download Session CSV**.
-- **Analytics**: Totals + CLEAN / DIRTY counts.
-- **Health**: Footer button checks API `/health`.
+## Quick Start Commands
 
-**API endpoints (unchanged)**
-- `GET /health` → `{"status":"ok","model":"v1.0","backend":"model"}`
-- `POST /predict-image` (field **image**)
-- `POST /predict-batch` (field **files**)
-- `GET /model-info`
+### 1. Clone and Setup
+```powershell
+# Clone repository
+git clone https://github.com/ShauryaPunj/SolarSage-AI.git
+cd SolarSage-AI
 
----
+# Install frontend dependencies
+npm install
 
-## 🚀 Quick Start (macOS, Apple Silicon)
+# Install backend dependencies
+cd service
+pip install -r ..\requirements.txt
+pip install python-multipart
+```
 
-```bash
-git clone <YOUR_REPO_URL> && cd Solar_Sage_AI
-npm install                    # optional; launcher can fall back to npx
-chmod +x start_mac.command
-./start_mac.command
+### 2. Run the Application
+
+Open two separate terminal windows:
+
+**Terminal 1 - Backend:**
+```powershell
+cd service
+python -m uvicorn app:app --reload
+```
+
+**Terminal 2 - Frontend:**
+```powershell
+# Make sure you're in the project root directory
+cd SolarSage-AI
+npm start
+```
+
+### 3. Verify Installation
+
+1. The backend should be running on: http://127.0.0.1:8000
+2. The Electron app should open automatically
+3. Click the "Health" button in the app footer - should show OK status
+
+### Troubleshooting
+
+If the app doesn't start:
+1. Make sure both terminals are running
+2. Verify port 8000 is not in use
+3. Check if all dependencies are installed correctly
+4. Try running `npm install` again if frontend doesn't start
